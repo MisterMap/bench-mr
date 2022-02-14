@@ -1,3 +1,4 @@
+from pickle import NONE
 import random
 import subprocess
 import datetime
@@ -11,7 +12,7 @@ import json
 from typing import Optional, Union
 from threading import Timer
 from copy import deepcopy
-
+from Centr_shift import start_end_correction
 from utils import *
 from multiprocessing import Pool
 from tqdm.notebook import tqdm
@@ -20,7 +21,7 @@ import os
 MPB_BINARY = os.environ.get("MPB_BINARY", './benchmark')
 MPB_BINARY_DIR = os.environ.get("MPB_BINARY_DIR", '../bin')
 MPB_PYTHON_BINARY = os.environ.get("MPB_PYTHON_BINARY", "./benchmark")
-
+MPB_PYTHON_BINARY_EMPTY = os.environ.get("MPB_PYTHON_BINARY_EMPTY", "./benchmark")
 # limit memory by this fraction of available memory if activated for parallel MPB execution
 MEMORY_LIMIT_FRACTION = min(0.9, 5. / os.cpu_count())
 
@@ -40,7 +41,7 @@ class MPB:
         # if not config_file.endswith("benchmark_template.json"):
         #     print("Created MPB from config %s." % config_file)
         self.output_path = output_path  # type: str
-        self.id = None  # type: Optional[str]
+        self.id = NONE # type: Optional[str]
         self._update_pss()
 
         # print("planners:       \t", self._planners)
@@ -78,11 +79,11 @@ class MPB:
         Update planners, smoothers, steer functions from config.
         """
         self._planners = [planner for planner, used in self["benchmark.planning"].items(
-        ) if used]  # type: [str]
+        ) if used]  # type:
         self._smoothers = [smoother for smoother,
-                           used in self["benchmark.smoothing"].items() if used]  # type: [str]
+                           used in self["benchmark.smoothing"].items() if used]  # 
         self._steer_functions = [steer_functions[index]
-                                 for index in self["benchmark.steer_functions"]]  # type: [str]
+                                 for index in self["benchmark.steer_functions"]]  # 
         self._robot_models = [robot_models[index]
                               for index in self["benchmark.forward_propagations"]]
 
@@ -297,6 +298,9 @@ class MPB:
             binary = MPB_BINARY
             if planner == "constrained_onf_planner":
                 binary = MPB_PYTHON_BINARY
+            # print(binary)
+            # print(os.path.abspath(self.config_filename))
+            # print(os.path.abspath(MPB_BINARY_DIR))
             tsk = subprocess.Popen([binary, os.path.abspath(self.config_filename)],
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    cwd=os.path.abspath(MPB_BINARY_DIR), env=self._env)
@@ -338,6 +342,7 @@ class MPB:
                         pbar.update(1)
                         pbar_prompt()
                 logfile.write(line)
+
             code = tsk.poll()
             if code is None:
                 code = 0
@@ -349,6 +354,138 @@ class MPB:
                 continue
             if ip > 0:
                 results_filenames.append(results_filename)
+                print(self.results_filename, results_filename)
+                MPB.merge([self.results_filename, results_filename],
+                          self.results_filename, silence=True)
+            # if show_progress_bar:
+            #     pbar.update(1)
+            if kill_timer is not None:
+                kill_timer.cancel()
+        if show_progress_bar:
+            pbar.close()
+        logfile.close()
+        # remove partial results files
+        for results_filename in results_filenames:
+            try:
+                os.remove(results_filename)
+            except:
+                print("Error: results %s do not exist." %
+                      results_filename, file=sys.stderr)
+        return code
+
+    def run_empty(self, id: str = None, runs: Optional[int] = None, subfolder: str = '',
+            show_progress_bar: bool = True, shuffle_planners: bool = True,
+            kill_after_timeout: bool = True, silence: bool = False) -> int:
+        if runs:
+            self["benchmark.runs"] = runs
+        else:
+            runs = self["benchmark.runs"]
+        ts = time.time()
+        if not id:
+            id = datetime.datetime.fromtimestamp(
+                ts).strftime('%Y-%m-%d_%H-%M-%S')
+        self.set_id(id)
+        self.set_subfolder(subfolder)
+        log_filename = os.path.join(subfolder, self.id + ".log")
+        logfile = open(log_filename, 'w')
+        if not silence:
+            print("Running MPB with ID %s (log file at %s)..." %
+                  (self.id, log_filename))
+        num_planners = len(self._planners)
+        total_iterations = num_planners * len(self._steer_functions) * runs
+        if show_progress_bar:
+            pbar = tqdm(range(total_iterations), desc=self.id) #, ncols='100%')
+        success = True
+        code = 0
+        results_filenames = []
+        if shuffle_planners:
+            # shuffle planners to avoid multiple parallel MPBs run the same heavy-load planners
+            # (e.g. CForest takes all available threads, SBPL leaks memory) at the same time
+            random.shuffle(self._planners)
+        for ip, planner in enumerate(self._planners):
+            run = 0
+
+            def pbar_prompt():
+                if not show_progress_bar:
+                    return
+                if runs > 1:
+                    pbar.display('%s (%i / %i) [run %i / %i]' % (
+                        convert_planner_name(planner), ip + 1, num_planners, min(run + 1, runs), runs))
+                else:
+                    pbar.display(
+                        '%s (%i / %i)' % (convert_planner_name(planner), ip + 1, num_planners))
+
+            pbar_prompt()
+
+            if ip == 0:
+                results_filename = self.results_filename
+            else:
+                results_filename = os.path.join(
+                    subfolder, self.id + "_results_%s.json" % planner)
+            self["benchmark.log_file"] = os.path.abspath(results_filename)
+            for p in self["benchmark.planning"].keys():
+                self["benchmark.planning." + p] = p == planner
+            self.save_settings(self.config_filename)
+            binary = MPB_BINARY
+            if planner == "constrained_onf_planner":
+                binary = MPB_PYTHON_BINARY_EMPTY
+            # print(binary)
+            # print(os.path.abspath(self.config_filename))
+            # print(os.path.abspath(MPB_BINARY_DIR))
+            tsk = subprocess.Popen([binary, os.path.abspath(self.config_filename)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   cwd=os.path.abspath(MPB_BINARY_DIR), env=self._env)
+            proc = psutil.Process(tsk.pid)
+            create_time = time.time()
+            kill_timer = None
+            if kill_after_timeout:
+                # kill process after 2 * max planning time
+                def kill_process():
+                    nonlocal success, code
+                    try:
+                        proc.kill()
+                        print("Killed %s with planner %s after %.2fs exceeded timeout."
+                              % (self.id, planner, time.time() - create_time))
+                        success = False
+                        code = -9
+                    except psutil.NoSuchProcess:
+                        pass
+                    except:
+                        print('Error occurred while trying to kill %s with planner %s.'
+                              % (self.id, planner), file=sys.stderr)
+                        success = False
+                        code = -9
+
+                kill_timer = Timer(
+                    self["max_planning_time"] * self["benchmark.runs"] * 2, kill_process)
+                kill_timer.start()
+            while True:
+                line = tsk.stdout.readline()
+                if line is None:
+                    break
+                line = line.decode('UTF-8')
+                if line == '':
+                    break
+                if '<stats>' in line:
+                    run += 1
+                    # some planner (and its smoothers) has finished
+                    if show_progress_bar:
+                        pbar.update(1)
+                        pbar_prompt()
+                logfile.write(line)
+
+            code = tsk.poll()
+            if code is None:
+                code = 0
+            if code is not None and code != 0:
+                print("Error (%i) occurred for MPB with ID %s using planner %s." % (
+                    code, self.id, convert_planner_name(planner)),
+                    file=sys.stderr)
+                success = False
+                continue
+            if ip > 0:
+                results_filenames.append(results_filename)
+                print(self.results_filename, results_filename)
                 MPB.merge([self.results_filename, results_filename],
                           self.results_filename, silence=True)
             # if show_progress_bar:
@@ -546,11 +683,18 @@ class MultipleMPB:
         # if memory_limit != 0:
         #     resource.setrlimit(resource.RLIMIT_AS, memory_limit)
         mpb = MPB(config_file=config_filename)
+        code = mpb.run_empty(id="corridor",
+                       runs=1,
+                       subfolder=subfolder,
+                       show_progress_bar=not silence,
+                       silence=silence)
+        start_end_correction(mpb.results_filename)
         code = mpb.run(id=mpb_id,
                        runs=runs,
                        subfolder=subfolder,
                        show_progress_bar=not silence,
                        silence=silence)
+
         if not silence:
             if code == 0:
                 print("Benchmark %i (%s) finished successfully." %
@@ -595,15 +739,19 @@ class MultipleMPB:
         config_files = []
         log_files = []
         subfolder_id = os.path.join(self.subfolder, self.id)
+        print(self.benchmarks)
         for i, mpb in enumerate(self.benchmarks):
+            mpb.id = None
             if mpb.id is None:
                 filename = "%s_%i_config.json" % (subfolder_id, i)
                 mpb.set_id("%s_%i" % (self.id, i))
                 log_files.append("%s_%i.log" % (subfolder_id, i))
             else:
-                filename = os.path.join(
-                    self.subfolder, mpb.id + "_config.json")
+                print(mpb.id)
+                filename = os.path.join(self.subfolder, mpb.id + "_config.json")
+                #filename = '/home/evgeny/pytorch-motion-planner/notebooks/benchmark/corridor_config.json'
                 log_files.append(os.path.join(self.subfolder, mpb.id + ".log"))
+                #log_files.append('/home/evgeny/pytorch-motion-planner/notebooks/benchmark/corridor.log')
             mpb.save_settings(filename)
             config_files.append(filename)
             ids.append(mpb.id)
