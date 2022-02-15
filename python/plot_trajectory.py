@@ -47,6 +47,7 @@ def plot_trajectory(traj, planner: str, settings, color, add_label=True, alpha: 
                     i % plot_every_nth_polygon != 0 and not (plot_last_polygon and i == traj.shape[0] - 1)):
                 continue
             state = traj[i, :]
+            state = np.append(state, 0)
             c, s = np.cos(-state[2]), np.sin(-state[2])
             rotation = np.array([[c, -s], [s, c]])
             poly = Polygon(state[:2] + np.matmul(points, rotation), True, fill=False, linestyle='--', edgecolor=color,
