@@ -80,7 +80,7 @@ class MPB:
         self._planners = [planner for planner, used in self["benchmark.planning"].items(
         ) if used]  # type: [str]
         self._smoothers = [smoother for smoother,
-                           used in self["benchmark.smoothing"].items() if used]  # type: [str]
+                                        used in self["benchmark.smoothing"].items() if used]  # type: [str]
         self._steer_functions = [steer_functions[index]
                                  for index in self["benchmark.steer_functions"]]  # type: [str]
         self._robot_models = [robot_models[index]
@@ -91,8 +91,8 @@ class MPB:
         if not os.path.exists(config_file):
             raise Exception('Could not find configuration template file at %s. ' % os.path.abspath(
                 os.path.join(MPB_BINARY_DIR, 'benchmark_template.json')) +
-                'Make sure you run the benchmark binary without CLI arguments to generate ' +
-                'benchmark_template.json.')
+                            'Make sure you run the benchmark binary without CLI arguments to generate ' +
+                            'benchmark_template.json.')
         with open(config_file, 'r') as f:
             config = json.load(f)["settings"]  # type: dict
         return config
@@ -344,7 +344,7 @@ class MPB:
             if code is not None and code != 0:
                 print("Error (%i) occurred for MPB with ID %s using planner %s." % (
                     code, self.id, convert_planner_name(planner)),
-                    file=sys.stderr)
+                      file=sys.stderr)
                 success = False
                 continue
             if ip > 0:
@@ -366,6 +366,62 @@ class MPB:
                 print("Error: results %s do not exist." %
                       results_filename, file=sys.stderr)
         return code
+
+    def run_custom_smoother(self, kill_after_timeout=True):
+        run = 0
+        log_filename = os.path.join('.', self.id + ".log")
+        logfile = open(log_filename, 'w')
+        success = True
+        # self["benchmark.log_file"] = os.path.abspath(self.results_filename)
+        binary = MPB_PYTHON_BINARY
+        tsk = subprocess.Popen([binary, os.path.abspath(self.results_filename)],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               cwd=os.path.abspath(MPB_BINARY_DIR), env=self._env)
+        proc = psutil.Process(tsk.pid)
+        create_time = time.time()
+        kill_timer = None
+        if kill_after_timeout:
+            # kill process after 2 * max planning time
+            def kill_process():
+                nonlocal success, code
+                try:
+                    proc.kill()
+                    print("Killed %s with planner %s after %.2fs exceeded timeout."
+                          % (self.id, planner, time.time() - create_time))
+                    success = False
+                    code = -9
+                except psutil.NoSuchProcess:
+                    pass
+                except:
+                    print('Error occurred while trying to kill %s with planner %s.'
+                          % (self.id, planner), file=sys.stderr)
+                    success = False
+                    code = -9
+
+            kill_timer = Timer(
+                self["max_planning_time"] * self["benchmark.runs"] * 2, kill_process)
+            kill_timer.start()
+        while True:
+            line = tsk.stdout.readline()
+            if line is None:
+                break
+            line = line.decode('UTF-8')
+            if line == '':
+                break
+            if '<stats>' in line:
+                run += 1
+            logfile.write(line)
+        code = tsk.poll()
+        if code is None:
+            code = 0
+        if code is not None and code != 0:
+            print("Error (%i) occurred for MPB with ID %s using planner" % (
+                code, self.id),
+                  file=sys.stderr)
+        if kill_timer is not None:
+            kill_timer.cancel()
+        logfile.close()
+
 
     def print_info(self):
         if not os.path.exists(self.results_filename):
@@ -391,7 +447,7 @@ class MPB:
         from trajectory import visualize_grid
         if set_suptitle:
             kwargs["suptitle"] = self.id
-        visualize_grid(self.results_filename,  **kwargs)
+        visualize_grid(self.results_filename, **kwargs)
 
     def plot_planner_stats(self, **kwargs):
         if not os.path.exists(self.results_filename):
